@@ -1,0 +1,31 @@
+# 敏感词 会被替换
+mg:
+- 我是敏感词
+- 我会变成***
+- 你信吗
+wj:
+- 我是违禁关键词
+- 违禁关键词
+- keyword
+ff:
+- 我是非法关键词
+- 非法关键词
+- 关键词
+
+rate:
+  allow_repeat: false
+  max_repeat: 1
+  similarity: 0.9
+  cooldown: 3000
+msg:
+  cooldown: '&7发送消息过于频繁,请等待&e&l{cooldown}秒&r&7后再尝试!'
+  repeat: '&f请不要频繁发送重复消息'
+  violation: '&f请勿发送敏感内容'
+  illegal: '&f请勿发送非法内容'
+  sensitive: '*'
+blacklist: []
+replace:
+  厉害: # 哪些词会被替换成'厉害'? (处理前: <AerMini> Loser   处理后: <AerMini> 厉害oser)
+    - L
+    - fw
+    - fvv

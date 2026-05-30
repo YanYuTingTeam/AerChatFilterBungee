@@ -1,0 +1,5 @@
+name: AerChatFilterBungee
+main: com.aermini.chatfilterbungee.AerChatFilterBungee
+version: ${project.version}
+author: AerMini
+description: A chat filter plugin for BungeeCord
