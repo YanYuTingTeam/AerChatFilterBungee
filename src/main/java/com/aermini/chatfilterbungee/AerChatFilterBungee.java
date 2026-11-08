@@ -20,27 +20,34 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class AerChatFilterBungee extends Plugin implements Listener {
-    private Configuration config;
-    private List<String> mgWords;
-    private List<String> wjWords;
-    private List<String> ffWords;
-    private Map<String, List<String>> replaceMap;
-    private List<String> blacklist;
-    private boolean allowRepeat;
-    private int maxRepeat;
-    private double similarityThreshold;
-    private long cooldownTime;
+    private volatile Configuration config;
+    private volatile List<String> mgWords;
+    private volatile List<String> wjWords;
+    private volatile List<String> ffWords;
+    private volatile Map<String, List<String>> replaceMap;
+    private volatile List<String> blacklist;
+    private volatile boolean allowRepeat;
+    private volatile int maxRepeat;
+    private volatile double similarityThreshold;
+    private volatile long cooldownTime;
     private Map<UUID, List<String>> playerMessageHistory = new ConcurrentHashMap<>(); // 存储玩家消息
     private Map<UUID, Long> lastMessageTimes = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
-        if (!getDataFolder().exists()) getDataFolder().mkdir();
+        if (!getDataFolder().exists() && !getDataFolder().mkdirs()) {
+            getLogger().severe("无法创建插件数据目录,插件功能未启用");
+            return;
+        }
         saveDefaultConfig();
-        loadConfig();
+        if (!loadConfig()) {
+            getLogger().severe("配置加载失败,插件功能未启用");
+            return;
+        }
         getProxy().getPluginManager().registerListener(this, this);
         getProxy().getPluginManager().registerCommand(this, new ReloadCommand());
         getLogger().info("AerChatFilterBungee 已启用");
@@ -55,6 +62,10 @@ public class AerChatFilterBungee extends Plugin implements Listener {
         File configFile = new File(getDataFolder(), "config.yml");
         if (!configFile.exists()) {
             try (InputStream in = getResourceAsStream("config.yml")) {
+                if (in == null) {
+                    getLogger().severe("jar 内缺少 config.yml,无法释放默认配置");
+                    return;
+                }
                 Files.copy(in, configFile.toPath());
             } catch (IOException e) {
                 e.printStackTrace();
@@ -62,7 +73,7 @@ public class AerChatFilterBungee extends Plugin implements Listener {
         }
     }
 
-    private void loadConfig() {
+    private boolean loadConfig() {
         try {
             File configFile = new File(getDataFolder(), "config.yml");
             config = ConfigurationProvider.getProvider(YamlConfiguration.class).load(configFile);
@@ -70,7 +81,7 @@ public class AerChatFilterBungee extends Plugin implements Listener {
             wjWords = config.getStringList("wj");
             ffWords = config.getStringList("ff");
             blacklist = config.getStringList("blacklist");
-            replaceMap = new HashMap<>();
+            replaceMap = new LinkedHashMap<>();
             Configuration replaceSection = config.getSection("replace");
             if (replaceSection != null) {
                 for (String replacement : replaceSection.getKeys()) {
@@ -85,8 +96,10 @@ public class AerChatFilterBungee extends Plugin implements Listener {
                 similarityThreshold = rateSection.getDouble("similarity", 0.9);
                 cooldownTime = rateSection.getLong("cooldown", 3000);
             }
-        } catch (IOException e) {
-            e.printStackTrace();
+            return true;
+        } catch (Exception e) {
+            getLogger().severe("配置加载失败: " + e.getMessage());
+            return false;
         }
     }
 
@@ -100,155 +113,102 @@ public class AerChatFilterBungee extends Plugin implements Listener {
         if (blacklist.contains(currentServer)) return;
         String message = event.getMessage();
         if (isCommand(message)) {
-            if (!player.hasPermission("aerchatfilter.bypass.wj")) {
-                for (String word : wjWords) {
-                    if (message.toLowerCase().contains(word.toLowerCase())) {
-                        player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', config.getString("msg.violation"))));
-                        event.setCancelled(true);
-                        return;
-                    }
-                }
-            }
-            
-            if (!player.hasPermission("aerchatfilter.bypass.ff")) {
-                for (String word : ffWords) {
-                    if (message.toLowerCase().contains(word.toLowerCase())) {
-                        player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', config.getString("msg.illegal"))));
-                        event.setCancelled(true);
-                        return;
-                    }
-                }
-            }
-            
-            UUID playerId = player.getUniqueId();
-            long currentTime = System.currentTimeMillis();
-            if (!player.hasPermission("aerchatfilter.bypass.cooldown")) {
-                Long lastMessageTime = lastMessageTimes.get(playerId);
-                if (lastMessageTime != null && (currentTime - lastMessageTime) < cooldownTime) {
-                    long remainingCooldown = (cooldownTime - (currentTime - lastMessageTime)) / 1000 + 1;
-                    String cooldownMsg = config.getString("msg.cooldown").replace("{cooldown}", String.valueOf(remainingCooldown));
-                    player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', cooldownMsg)));
-                    event.setCancelled(true);
-                    return;
-                }
-            }
-            if (!player.hasPermission("aerchatfilter.bypass.repeat") && !allowRepeat) {
-                List<String> messageHistory = playerMessageHistory.computeIfAbsent(playerId, k -> new ArrayList<>());
-                String lastMessage = messageHistory.isEmpty() ? "" : messageHistory.get(messageHistory.size() - 1);
-                if (!lastMessage.isEmpty()) {
-                    double similarity = calculateSimilarity(message.toLowerCase(), lastMessage.toLowerCase());
-                    if (similarity >= similarityThreshold) {
-                        int repeatCount = 0;
-                        for (int i = messageHistory.size() - 1; i >= 0; i--) {
-                            if (calculateSimilarity(messageHistory.get(i).toLowerCase(), lastMessage.toLowerCase()) >= similarityThreshold) {
-                                repeatCount++;
-                            } else {
-                                break;
-                            }
-                        }
-                        
-                        if (repeatCount >= maxRepeat) {
-                            player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', config.getString("msg.repeat"))));
-                            event.setCancelled(true);
-                            return;
-                        }
-                    } 
-                }
-                
-                messageHistory.add(message);
-                if (messageHistory.size() > 10) {
-                    messageHistory.remove(0);
-                }
-            }
-            if (!player.hasPermission("aerchatfilter.bypass.cooldown")) lastMessageTimes.put(playerId, currentTime);
+            checkWords(player, event, message);
             return;
         }
         UUID playerId = player.getUniqueId();
         long currentTime = System.currentTimeMillis();
-
-        // 发言冷却
-        if (!player.hasPermission("aerchatfilter.bypass.cooldown")) {
-            Long lastMessageTime = lastMessageTimes.get(playerId);
-            if (lastMessageTime != null && (currentTime - lastMessageTime) < cooldownTime) {
-                long remainingCooldown = (cooldownTime - (currentTime - lastMessageTime)) / 1000 + 1;
-                String cooldownMsg = config.getString("msg.cooldown").replace("{cooldown}", String.valueOf(remainingCooldown));
-                player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', cooldownMsg)));
-                event.setCancelled(true);
-                return;
-            }
-        }
-        
-        // 重复消息
+        if (checkCooldown(player, event, currentTime)) return;
+        if (checkRepeat(player, event, playerId, message)) return;
+        if (checkWords(player, event, message)) return;
         if (!player.hasPermission("aerchatfilter.bypass.repeat") && !allowRepeat) {
             List<String> messageHistory = playerMessageHistory.computeIfAbsent(playerId, k -> new ArrayList<>());
-            String lastMessage = messageHistory.isEmpty() ? "" : messageHistory.get(messageHistory.size() - 1);
-            if (!lastMessage.isEmpty()) {
-                double similarity = calculateSimilarity(message.toLowerCase(), lastMessage.toLowerCase());
-                if (similarity >= similarityThreshold) {
-                    int repeatCount = 0;
-                    for (int i = messageHistory.size() - 1; i >= 0; i--) {
-                        if (calculateSimilarity(messageHistory.get(i).toLowerCase(), lastMessage.toLowerCase()) >= similarityThreshold) {
-                            repeatCount++;
-                        } else {
-                            break;
-                        }
-                    }
-                    
-                    if (repeatCount >= maxRepeat) {
-                        player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', config.getString("msg.repeat"))));
-                        event.setCancelled(true);
-                        return;
-                    }
-                } 
-            }
             messageHistory.add(message);
             if (messageHistory.size() > 10) {
                 messageHistory.remove(0);
             }
         }
-        
-        // 违禁词
-        if (!player.hasPermission("aerchatfilter.bypass.wj")) {
-            for (String word : wjWords) {
-                if (message.toLowerCase().contains(word.toLowerCase())) {
-                    player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', config.getString("msg.violation"))));
-                    event.setCancelled(true);
-                    return;
-                }
-            }
-        }
-        
-        // 非法词
-        if (!player.hasPermission("aerchatfilter.bypass.ff")) {
-            for (String word : ffWords) {
-                if (message.toLowerCase().contains(word.toLowerCase())) {
-                    player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', config.getString("msg.illegal"))));
-                    event.setCancelled(true);
-                    return;
-                }
-            }
-        }
-        
-        // 替换
+        if (!player.hasPermission("aerchatfilter.bypass.cooldown")) lastMessageTimes.put(playerId, currentTime);
         String filteredMessage = message;
         if (!player.hasPermission("aerchatfilter.bypass.replace")) {
             filteredMessage = applyReplacements(message);
         }
-        
-        // 敏感词替换
         if (!player.hasPermission("aerchatfilter.bypass.mg")) {
+            String sensitiveReplacement = config.getString("msg.sensitive", "*");
             for (String word : mgWords) {
-                if (filteredMessage.toLowerCase().contains(word.toLowerCase())) {
-                    String sensitiveReplacement = config.getString("msg.sensitive", "*");
-                    filteredMessage = filteredMessage.replaceAll("(?i)" + Pattern.quote(word), getReplacementString(word, sensitiveReplacement));
+                if (filteredMessage.toLowerCase(Locale.ROOT).contains(word.toLowerCase(Locale.ROOT))) {
+                    filteredMessage = filteredMessage.replaceAll("(?i)" + Pattern.quote(word), Matcher.quoteReplacement(getReplacementString(word, sensitiveReplacement)));
                 }
             }
         }
-
-        if (!player.hasPermission("aerchatfilter.bypass.cooldown")) lastMessageTimes.put(playerId, currentTime);
         event.setMessage(filteredMessage);
     }
-    
+
+    private boolean checkCooldown(ProxiedPlayer player, ChatEvent event, long currentTime) {
+        if (player.hasPermission("aerchatfilter.bypass.cooldown")) return false;
+        Long lastMessageTime = lastMessageTimes.get(player.getUniqueId());
+        if (lastMessageTime != null && (currentTime - lastMessageTime) < cooldownTime) {
+            long remainingCooldown = (cooldownTime - (currentTime - lastMessageTime)) / 1000 + 1;
+            String cooldownMsg = config.getString("msg.cooldown", "&7发送消息过于频繁,请等待&e&l{cooldown}秒&r&7后再尝试!").replace("{cooldown}", String.valueOf(remainingCooldown));
+            player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', cooldownMsg)));
+            event.setCancelled(true);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean checkRepeat(ProxiedPlayer player, ChatEvent event, UUID playerId, String message) {
+        if (player.hasPermission("aerchatfilter.bypass.repeat") || allowRepeat) return false;
+        List<String> messageHistory = playerMessageHistory.computeIfAbsent(playerId, k -> new ArrayList<>());
+        String lastMessage = messageHistory.isEmpty() ? "" : messageHistory.get(messageHistory.size() - 1);
+        if (lastMessage.isEmpty()) return false;
+        String lowerMessage = message.toLowerCase(Locale.ROOT);
+        String lowerLast = lastMessage.toLowerCase(Locale.ROOT);
+        if (calculateSimilarity(lowerMessage, lowerLast) < similarityThreshold) return false;
+        int repeatCount = 0;
+        for (int i = messageHistory.size() - 1; i >= 0; i--) {
+            if (calculateSimilarity(messageHistory.get(i).toLowerCase(Locale.ROOT), lowerLast) >= similarityThreshold) {
+                repeatCount++;
+            } else {
+                break;
+            }
+        }
+        if (repeatCount >= maxRepeat) {
+            sendMsg(player, "msg.repeat", "&f请不要频繁发送重复消息");
+            event.setCancelled(true);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean checkWords(ProxiedPlayer player, ChatEvent event, String message) {
+        if (!player.hasPermission("aerchatfilter.bypass.wj") && containsWord(message, wjWords)) {
+            sendMsg(player, "msg.violation", "&f请勿发送敏感内容");
+            event.setCancelled(true);
+            return true;
+        }
+        if (!player.hasPermission("aerchatfilter.bypass.ff") && containsWord(message, ffWords)) {
+            sendMsg(player, "msg.illegal", "&f请勿发送非法内容");
+            event.setCancelled(true);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean containsWord(String message, List<String> words) {
+        String lowerMessage = message.toLowerCase(Locale.ROOT);
+        for (String word : words) {
+            if (lowerMessage.contains(word.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void sendMsg(ProxiedPlayer player, String key, String def) {
+        player.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', config.getString(key, def))));
+    }
+
     @EventHandler
     public void onPlayerDisconnect(PlayerDisconnectEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
@@ -266,7 +226,7 @@ public class AerChatFilterBungee extends Plugin implements Listener {
             String replacement = entry.getKey();
             List<String> originalWords = entry.getValue();
             for (String originalWord : originalWords) {
-                result = result.replaceAll("(?i)" + Pattern.quote(originalWord), replacement);
+                result = result.replaceAll("(?i)" + Pattern.quote(originalWord), Matcher.quoteReplacement(replacement));
             }
         }
         return result;
@@ -302,10 +262,10 @@ public class AerChatFilterBungee extends Plugin implements Listener {
         int maxLen = Math.max(str1.length(), str2.length());
         return 1.0 - (double) dp[str1.length()][str2.length()] / maxLen;
     }
-    
+
     public class ReloadCommand extends Command {
         public ReloadCommand() {
-            super("acfb", "", "aerchatfilterbungee");
+            super("acfb", "aerchatfilterbungee.reload", "aerchatfilterbungee");
         }
         @Override
         public void execute(CommandSender sender, String[] args) {
@@ -314,13 +274,14 @@ public class AerChatFilterBungee extends Plugin implements Listener {
                     sender.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', "&c你没有权限执行此命令!")));
                     return;
                 }
-                loadConfig();
-                sender.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', "&a配置已重新加载!")));
+                if (loadConfig()) {
+                    sender.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', "&a配置已重新加载!")));
+                } else {
+                    sender.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', "&c配置重载失败,请检查后台日志!")));
+                }
                 return;
             }
             sender.sendMessage(new TextComponent(ChatColor.translateAlternateColorCodes('&', "&e&lAerChatFilterBungee &r&7for &b&lYanYuTing &8| &r&fby. &dAerMini")));
         }
     }
 }
-
-
